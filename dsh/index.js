@@ -14,8 +14,10 @@
  *   - @deepseek-ai/dsh-mcp-client 的真实工具桥接形状（parameters 用原始 JSON Schema）
  */
 import Schema from '@deepseek-ai/schemastery'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { Readable } from 'node:stream'
 import { McpStdioClient } from '../lib/mcp-bridge.mjs'
 import { buildToolDefinitions } from '../lib/tool-defs.mjs'
 
@@ -38,6 +40,10 @@ export const Config = Schema.object({
 
 const PREFIX = '/api/pecker-dsh-workbench'
 const PROBE_TIMEOUT_MS = 3_000
+/** 看板（嵌入式产物）由本插件托管的路径。 */
+const BOARD_PATH = `${PREFIX}/board.js`
+/** 平台 API 的同源反代前缀：面板里的看板用它取数据（后端没有 CORS，必须同源）。 */
+const PLATFORM_PREFIX = `${PREFIX}/platform`
 /** 等 ctx.tools 就绪多久之后提醒一次（只提醒，不关连接、不放弃）。 */
 const PENDING_WARN_MS = 30_000
 
@@ -151,6 +157,136 @@ export function apply(ctx, config) {
       return json({ bridge: { ...bridge, toolNames: [...bridge.toolNames], skipped: [...bridge.skipped] } })
     },
   })
+
+  // ---------------- 看板托管 + 平台同源反代（V3）----------------
+  // 面板里的看板跑在宿主渲染器里：它读不到插件包目录，也不该跨源直连平台
+  // （平台后端**没有 CORS**）。所以服务端做两件事：
+  //   1. 托管单文件看板产物 `lib/board.js`；
+  //   2. 把 `/api/pecker-dsh-workbench/platform/*` 同源反代到平台 API，
+  //      含 SSE 与 Range 的**流式透传**（视频拖动/事件流都靠它）。
+  // 用 `webServer` 而不是 `connection.fetch`：后者只支持精确路径，这里需要**前缀**匹配
+  // （@deepseek-ai/dsh-host-webserver 支持 exact/prefix，最长前缀优先）。
+  let boardCache = null
+  ctx.inject(['webServer'], (serverCtx) => {
+    ctx.effect(() => serverCtx.webServer.register({
+      kind: 'exact',
+      path: BOARD_PATH,
+      handler: (request, response) => serveBoard(request, response),
+    }), 'pecker-dsh-workbench: board asset')
+    ctx.effect(() => serverCtx.webServer.register({
+      kind: 'prefix',
+      path: PLATFORM_PREFIX,
+      handler: (request, response) => {
+        void proxyPlatform(request, response)
+      },
+    }), 'pecker-dsh-workbench: platform proxy')
+    ctx.logger.info(`pecker-dsh-workbench: 已托管看板 ${BOARD_PATH}，反代前缀 ${PLATFORM_PREFIX}`)
+  })
+
+  /** 托管看板单文件产物（带 mtime 缓存，读不到就如实 404 并说明怎么生成）。 */
+  function serveBoard(request, response) {
+    const file = fileURLToPath(new URL('../lib/board.js', import.meta.url))
+    try {
+      const stat = statSync(file)
+      if (boardCache === null || boardCache.mtimeMs !== stat.mtimeMs) {
+        boardCache = { mtimeMs: stat.mtimeMs, body: readFileSync(file) }
+      }
+      response.writeHead(200, {
+        'content-type': 'text/javascript; charset=utf-8',
+        'content-length': boardCache.body.length,
+        'cache-control': 'no-store',
+        'x-board-source': file,
+      })
+      response.end(boardCache.body)
+    } catch (error) {
+      response.writeHead(404, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+      response.end(JSON.stringify({
+        detail: `看板产物不存在：${file}`,
+        hint: '先在 web/ 跑 pnpm build:embed，再在插件仓库跑 node scripts/sync-board.mjs',
+        error: error instanceof Error ? error.message : String(error),
+      }))
+    }
+  }
+
+  /**
+   * 同源反代到平台 API。
+   *
+   * 关键点：
+   * - 一律 `accept-encoding: identity`：避免 undici 透明解压与 content-length 不一致；
+   * - **不设整体超时**：视频 Range 与 SSE 都是长连接，超时会把播放/事件流截断；
+   * - 客户端断开时 `AbortController` 一路 abort 到上游（否则每次挂/卸面板都会漏一个 SSE）；
+   * - 只透传安全头，丢掉 hop-by-hop。
+   */
+  async function proxyPlatform(request, response) {
+    const raw = request.url ?? '/'
+    const rest = raw.slice(PLATFORM_PREFIX.length) || '/'
+    const target = new URL(rest.startsWith('/') ? rest : `/${rest}`, `${platformBaseUrl}/`)
+    const headers = { ...request.headers }
+    delete headers.host
+    delete headers.connection
+    delete headers['content-length']
+    headers['accept-encoding'] = 'identity'
+    const hasBody = request.method !== 'GET' && request.method !== 'HEAD'
+    const controller = new AbortController()
+    // 客户端提前断开（关面板、切标签、视频 seek、SSE 取消）时别把上游留着。
+    // 注意用 response 的 close 而不是 request 的：GET 的 request 流在请求体读完后就会 close，
+    // 挂在那里会在响应还没写完时就把上游 abort 掉。只有在"响应没正常结束"时才 abort。
+    response.on('close', () => {
+      if (!response.writableEnded) {
+        try {
+          controller.abort()
+        } catch {
+          /* abort 本身失败无妨 */
+        }
+      }
+    })
+    try {
+      const upstream = await fetch(target, {
+        method: request.method,
+        headers,
+        body: hasBody ? request : undefined,
+        duplex: hasBody ? 'half' : undefined,
+        redirect: 'manual',
+        signal: controller.signal,
+      })
+      const outHeaders = {}
+      upstream.headers.forEach((value, key) => {
+        const name = key.toLowerCase()
+        if (name === 'connection' || name === 'keep-alive' || name === 'transfer-encoding' || name === 'upgrade') return
+        outHeaders[name] = value
+      })
+      if (!response.headersSent) response.writeHead(upstream.status, outHeaders)
+      if (upstream.body === null) {
+        response.end()
+        return
+      }
+      // 关键：上游被 abort（客户端断开）时，读流会 emit AbortError；
+      // 不接住它就会变成 unhandled 'error' 并**打挂整个 harness 进程**。
+      const body = Readable.fromWeb(upstream.body)
+      body.on('error', () => {
+        if (!response.writableEnded) response.destroy()
+      })
+      response.on('error', () => {
+        body.destroy()
+      })
+      body.pipe(response)
+    } catch (error) {
+      if (response.headersSent) {
+        response.destroy()
+        return
+      }
+      // 客户端自己断开导致的 abort 不是错误，不该报 502。
+      if (controller.signal.aborted) {
+        response.destroy()
+        return
+      }
+      response.writeHead(502, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+      response.end(JSON.stringify({
+        detail: `平台反代失败：${target.pathname}${target.search}`,
+        error: error instanceof Error ? error.message : String(error),
+      }))
+    }
+  }
 
   ctx.effect(() => () => {
     clearPendingWatchdog()

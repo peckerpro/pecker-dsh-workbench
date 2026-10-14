@@ -43,6 +43,8 @@ check(Array.isArray(rejected?.issues) && rejected.issues.length > 0, 'Config 对
 const routes = new Map()
 const logs = []
 const effects = []
+const webRoutes = []
+const injected = []
 const ctx = {
   logger: {
     info: (message) => logs.push(`info: ${message}`),
@@ -54,8 +56,15 @@ const ctx = {
     const dispose = factory()
     return typeof dispose === 'function' ? dispose : () => {}
   },
-  inject() {
-    throw new Error('V1 冒烟测试不应触发 ctx.inject（桥接必须在 unconfigured 时跳过）')
+  inject(deps, callback) {
+    injected.push([...deps])
+    if (deps.includes('webServer')) {
+      // ctx.inject 是延迟子插件；这里模拟"服务已就绪、立即 apply"。
+      callback({ webServer: { register: (route) => { webRoutes.push(route); return () => {} } } })
+      return { dispose() {} }
+    }
+    if (deps.includes('tools')) throw new Error('本场景不应注册工具（MCP 未就绪）')
+    return { dispose() {} }
   },
   connection: {
     fetch: {
@@ -69,7 +78,7 @@ const ctx = {
 
 entry.apply(ctx, entry.Config(validated.value))
 
-check(routes.size === 4, `注册了 4 条路由（实际 ${routes.size}）`)
+check(routes.size === 4, `注册了 4 条 connection 路由（实际 ${routes.size}）`)
 for (const path of [
   '/api/pecker-dsh-workbench/ping',
   '/api/pecker-dsh-workbench/config',
@@ -78,6 +87,11 @@ for (const path of [
 ]) {
   check(routes.has(path), `路由存在：${path}`)
 }
+check(webRoutes.length === 2, `注册了 2 条 webServer 路由（实际 ${webRoutes.length}）`)
+check(webRoutes.some((route) => route.kind === 'exact' && route.path === '/api/pecker-dsh-workbench/board.js'),
+  'webServer: 看板产物路由（exact /board.js）')
+check(webRoutes.some((route) => route.kind === 'prefix' && route.path === '/api/pecker-dsh-workbench/platform'),
+  'webServer: 平台反代路由（prefix /platform，connection.fetch 只支持精确路径，做不到）')
 check([...routes.keys()].every((path) => path.startsWith('/api/pecker-dsh-workbench/')),
   '所有路由都在自己的前缀下（不占用宿主或其他插件的路径）')
 check(effects.some((label) => label.includes('bridge lifetime')), '登记了 bridge 生命周期 effect')
@@ -102,10 +116,19 @@ check(status.plugin?.workbenchId === 'peckerpro/pecker-dsh-workbench', '/status 
 // ---- 4. 已配置但平台未跑：reachable=false，且 bridge 尝试失败后如实记录 ----
 const routes2 = new Map()
 const logs2 = []
+const webRoutes2 = []
+const injected2 = []
 const ctx2 = {
   logger: { info: (m) => logs2.push(`info: ${m}`), warn: (m) => logs2.push(`warn: ${m}`), error: (m) => logs2.push(`error: ${m}`) },
   effect: (factory) => { factory(); return () => {} },
-  inject: () => { throw new Error('平台 MCP 不可用时不应注册工具（ctx.inject 不应被调用）') },
+  inject: (deps, callback) => {
+    injected2.push([...deps])
+    if (deps.includes('webServer')) {
+      callback({ webServer: { register: (route) => { webRoutes2.push(route); return () => {} } } })
+      return { dispose() {} }
+    }
+    return { dispose() {} }
+  },
   connection: { fetch: { register: (route) => routes2.set(route.path, route) } },
 }
 const config2 = entry.Config({
@@ -123,6 +146,9 @@ check(typeof status2.bridge?.error === 'string' && status2.bridge.error.length >
 check(status2.bridge?.toolCount === 0, '失败时注册 0 个工具')
 check(logs2.some((line) => line.startsWith('warn:') && line.includes('平台 MCP 不可用')), '失败时打 warn 日志（不静默）')
 check(Array.isArray(status2.startCommands) && status2.startCommands.length === 4, '配置了 projectDir 时给出 4 条启动命令')
+// MCP 失败时不得去注册工具；但看板/反代路由与 MCP 无关，仍应注册（否则面板连状态都看不到）。
+check(!injected2.some((deps) => deps.includes('tools')), 'MCP 不可用时不尝试注入 tools')
+check(webRoutes2.length === 2, `MCP 不可用时仍托管看板与反代（实际 ${webRoutes2.length} 条）`)
 
 console.log('# 服务端入口冒烟测试')
 console.log(results.join('\n'))

@@ -59,6 +59,33 @@ harness.log: warn pecker-dsh-workbench: ctx.tools 不可用，27 个工具未注
 1. **别用 PowerShell 5.1 的 `Set-Content`/`Add-Content` 改带中文的源码**：它按 ANSI 读、按 UTF-8 写 → 双重编码。本次把 `dsh/index.js` 写坏（已 `git checkout` 还原并用编辑工具重做），还让 `package.json` 多了 BOM 导致 `JSON.parse` 失败。
 2. pid 追踪要按"端口 + 命令行签名"识别真实进程，否则会杀到已退出的包装进程（本项目已修）。
 
+## 1.2 0.1.3：看板嵌进面板（V3 服务端部分）
+
+面板从"只有状态栏"升级为"**左边看板 + 右边原生会话与状态**"。看板是 `web/` 的嵌入式产物
+（React 19 + Tailwind CSS 内联的单文件），由本插件托管；数据经本插件**同源反代**到平台。
+
+| 新增 | 说明 |
+|---|---|
+| `lib/board.js` | 看板单文件产物（796,083 B），由 `web/` 的 `pnpm build:embed` 生成、`node scripts/sync-board.mjs` 同步进来。**它必须提交进插件仓库**，否则面板打开就是"看板没加载起来" |
+| `GET /api/pecker-dsh-workbench/board.js` | 托管上面那份产物（带 mtime 缓存；缺失时 404 并给出生成命令） |
+| `/api/pecker-dsh-workbench/platform/*`（**prefix**） | 同源反代到平台 API：透传 Range（视频拖动）、SSE 流式、POST 体；`accept-encoding: identity` 避免解压/content-length 不一致；**不设整体超时**（长连接）；客户端断开时 abort 上游 |
+
+**为什么用 `webServer` 而不是 `connection.fetch`**：后者只支持精确路径，而反代必须是**前缀**匹配
+（`@deepseek-ai/dsh-host-webserver` 支持 `exact`/`prefix`，最长前缀优先）。看板路由与反代都用 `ctx.inject(['webServer'], …)`
+可选注入：拿不到服务时面板退回"只有状态栏"，并如实说明。
+
+**验证（全部真跑）**
+| 测试 | 结果 |
+|---|---|
+| `test/board-and-proxy.mjs` | **13/13**：`/board.js` 200 且字节数与磁盘一致、`Content-Length` 一致；反代 `/api/health`、`/api/overview` 200；缩略图带 `Range: bytes=0-1023` 返回 **206**；SSE 200 + `text/event-stream` 且收到真实帧（`event: workbench-event`）；平台不可达时 **502 + 可读原因** |
+| `test/server-entry-smoke.mjs` | 33/33（新增：2 条 webServer 路由；MCP 失败时不注入 tools，但仍托管看板与反代） |
+| `test/client-smoke.mjs` | 20/20（面板仍把原生 `conversation` 节点放进布局、不重建聊天容器） |
+| `test/check-package` / `deferred` / `bridge-smoke` / `tool-matrix` | 33 / 21 / 全通过 / 19 项 ok |
+
+**修掉一个会打挂 harness 的缺陷**：反代在客户端断开时 abort 上游，读流的 `AbortError` 原本是
+**未处理的 'error' 事件**（真机上会崩掉整个 harness 进程）。现在 `body.on('error')` 收口、只在
+"响应未正常结束"时 abort，并且客户端主动断开不再误报 502。这个 bug 是测试真去取消 SSE 流才暴露的。
+
 命令行说明：`DSH Desktop.exe` 是 GUI 子系统程序，直接用 `&`/`Start-Process` 抓不到输出；本机用 `work/dsh-cli.cmd`（`cmd /c` + `ELECTRON_RUN_AS_NODE=1` 转发到 asar 内的 `bin.js`）才是可靠的调用方式。
 
 **为什么需要那行覆盖**：PATH 上的 `python` 是 `D:\anaconda\python.exe`（3.11.9，**没有 `mcp` 包**），而平台业务 MCP 需要 `C:\Python313\python.exe`（3.13.1，有 `mcp`）。若沿用默认 `python`，重启后桥接会如实变成 `unavailable`、0 个工具——那是"正确但没用"的状态，所以必须在 profile 覆盖里钉死解释器。

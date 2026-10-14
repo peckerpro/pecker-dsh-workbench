@@ -1,7 +1,7 @@
 {
   "name": "pecker-dsh-workbench",
-  "version": "0.1.2",
-  "description": "鏈湴鍒涗綔宸ュ叿 脳 DSH Desktop 宸ヤ綔鍙帮細鎶婄礌鏉愩€佷綔鍝併€佷綔涓氫笌鍒涗綔鑳藉姏鎺ヨ繘鏈満浼氳瘽",
+  "version": "0.1.3",
+  "description": "本地创作工具 × DSH Desktop 工作台：把素材、作品、作业与创作能力接进本机会话",
   "type": "module",
   "private": true,
   "author": "peckerpro",
@@ -61,6 +61,7 @@
   "scripts": {
     "test": "node test/check-package.mjs && node test/server-entry-smoke.mjs",
     "test:mcp": "node test/bridge-smoke.mjs",
-    "pack:check": "node test/check-package.mjs"
+    "pack:check": "node test/check-package.mjs",
+    "sync:board": "node scripts/sync-board.mjs"
   }
 }

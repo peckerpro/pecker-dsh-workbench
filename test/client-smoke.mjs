@@ -48,8 +48,12 @@ const fakeReact = {
     return [typeof initial === 'function' ? initial() : initial, () => {}]
   },
   useCallback: (fn) => fn,
+  useRef(initial) {
+    return { current: initial ?? null }
+  },
   useEffect: () => {},
 }
+fakeReact.Fragment = Symbol('Fragment')
 const requireStub = (specifier) => {
   if (specifier === 'react') return fakeReact
   throw new Error(`客户端 require 了共享基线之外的模块：${specifier}`)
