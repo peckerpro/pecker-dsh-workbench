@@ -1,6 +1,6 @@
 {
   "name": "pecker-dsh-workbench",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "本地创作工具 × DSH Desktop 工作台：把素材、作品、作业与创作能力接进本机会话",
   "type": "module",
   "private": true,
