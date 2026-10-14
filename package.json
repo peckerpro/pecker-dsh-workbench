@@ -1,0 +1,66 @@
+{
+  "name": "pecker-dsh-workbench",
+  "version": "0.1.0",
+  "description": "本地创作工具 × DSH Desktop 工作台：把素材、作品、作业与创作能力接进本机会话",
+  "type": "module",
+  "private": true,
+  "author": "peckerpro",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/peckerpro/pecker-dsh-workbench.git"
+  },
+  "homepage": "https://github.com/peckerpro/pecker-dsh-workbench#readme",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-workbench",
+    "dsh-plugin",
+    "local-creation"
+  ],
+  "main": "./dsh/index.js",
+  "exports": {
+    ".": "./dsh/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "files": [
+    "dsh/**",
+    "lib/**",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "dsh-desktop-workbenches"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.0 <5",
+    "@deepseek-ai/schemastery": ">=3.18.4 <4"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "scripts": {
+    "test": "node test/check-package.mjs && node test/server-entry-smoke.mjs",
+    "test:mcp": "node test/bridge-smoke.mjs",
+    "pack:check": "node test/check-package.mjs"
+  }
+}

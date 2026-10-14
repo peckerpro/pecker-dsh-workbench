@@ -1,0 +1,21 @@
+# DSH 工作台包的服务端入口。
+#
+# install 之后这一行会进入 profile 的插件树：
+#   %APPDATA%\dsh-desktop\harness\profiles\web\cordis.patch.yml
+# 或由 `dsh plugin --profile web add file:<tgz>` 自动写入 profile 的 bundle 层。
+#
+# 唯一必须由安装者确认的键是 projectDir（业务平台所在的绝对路径）。
+# 其余键都有默认值，可按需覆盖（覆盖时注意：patch 会整行替换 config，不是深合并）。
+- insert:
+    - id: pecker-dsh-workbench
+      name: pecker-dsh-workbench
+      config:
+        # 插件自己的数据目录（DSH 数据目录下），V1 只用于将来的工作台自有状态。
+        root: !!js dshHomePath('pecker-dsh-workbench')
+        # 业务平台根目录：必须指向包含 platform/ config/ 的那个目录。
+        projectDir: 'D:\project\本地创作工具'
+        # 平台 HTTP API / 独立看板（默认值即这两条，无需改动）。
+        # platformBaseUrl: 'http://127.0.0.1:8765'
+        # dashboardUrl: 'http://127.0.0.1:5173'
+        # 用于启动业务 MCP 的 Python（留空则用 PATH 上的 python）。
+        # python: 'C:\Python313\python.exe'

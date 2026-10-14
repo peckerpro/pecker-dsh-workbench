@@ -1,0 +1,9 @@
+# 本机开发测试用的宿主包副本（从 app.asar 提取），不进安装包
+node_modules/
+
+# 打包产物
+*.tgz
+
+# 编辑器/系统
+.DS_Store
+Thumbs.db
