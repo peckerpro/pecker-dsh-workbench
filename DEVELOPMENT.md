@@ -26,6 +26,9 @@
 | 16 | **已安装副本能否被宿主加载** | `PECKER_ENTRY=<installed>/dsh/index.js node --import ./test/host-fallback.mjs test/server-entry-smoke.mjs`、`PECKER_CLIENT=<installed>/lib/client.js node test/client-smoke.mjs` | **28 项 + 20 项全部通过**。关键点：已安装副本的 `node_modules` 里**没有** `@deepseek-ai/*`，测试用与 Desktop `host-module-fallback.mjs` 相同的解析回退才能跑通 → 与重启后的真实加载路径一致 |
 | 17 | **0.1.1 加固 + 升级安装** | 重新 `pnpm pack` → `dsh plugin --profile web remove pecker-dsh-workbench` → `add file:…0.1.1.tgz` | 卸载把 bundle 与依赖都摘干净（bundle 列表回到 9 项），再装 0.1.1 成功（`+ pecker-dsh-workbench file:…0.1.1.tgz`、`Packages: +1`）；磁盘上 `node_modules/pecker-dsh-workbench/package.json` = 0.1.1、profile 依赖 spec 指向 0.1.1。**注意**：删除旧 tgz 后直接 `add` 新包会失败（pnpm 要解析 profile 里仍指向旧 tgz 的 spec，报 `ENOENT …0.1.0.tgz`），必须先 `remove` 再 `add`，或保留旧 tgz |
 | 18 | 全量测试（0.1.1） | `check-package` / `server-entry-smoke`（带宿主回退）/ `client-smoke` / `bridge-smoke` | **33 + 28 + 20 项通过 + 真实 MCP 全通过** |
+| 19 | **只读工具矩阵** | `node test/tool-matrix.mjs --json <out>` | **19/19 通过**（capabilities、roots、assets/versions/tools/skills/jobs/events/recipes/agents 的读操作 + media_probe）。矩阵刻意不碰写/联网/收费工具 |
+| 20 | **发现并修掉 2 个平台 MCP 缺陷** | 矩阵首轮 18 项里 `roots` 失败、`skills_inspect` 失败 | ① `roots` 恒报 `'function' object has no attribute 'all'`（局部变量被同名工具函数遮蔽）→ 平台侧改名 `root_map`；② 纯 MCP 无法发现 `skill_id` → `skills_list` 增加可选 `provider_id`。修后矩阵 19/19；平台侧新增 `tests/test_mcp_tools_regression.py`（5 项）锁定 |
+| 21 | **自然语言链路端到端（走工作台工具）** | 会话内 `workbench_agents_submit_request` → `workbench_agents_attach_plan(plan_source=dsh_session)` → 执行 | `agentreq_ee2dcd24b6924d3b`：`submitted → planned → executed`；probe `business_status=ok`、`process_exit_code=0`、`qa.full_decode=passed`。这同时补上了"写路径缺证据"这一条 |
 
 命令行说明：`DSH Desktop.exe` 是 GUI 子系统程序，直接用 `&`/`Start-Process` 抓不到输出；本机用 `work/dsh-cli.cmd`（`cmd /c` + `ELECTRON_RUN_AS_NODE=1` 转发到 asar 内的 `bin.js`）才是可靠的调用方式。
 

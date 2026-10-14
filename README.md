@@ -83,7 +83,9 @@ $env:ELECTRON_RUN_AS_NODE='1'
 ```powershell
 node test/check-package.mjs        # 33 项：包字段 / 客户端契约 / patch 契约
 node test/server-entry-smoke.mjs   # 28 项：mock cordis 跑 apply()，含"平台不可达不伪造成功"
+node test/client-smoke.mjs         # 20 项：执行客户端 bundle，用假 React 渲染面板并校验注册描述符
 node test/bridge-smoke.mjs         # 真实 MCP：握手 + tools/list(27) + 工具映射 + 可选 tools/call
+node test/tool-matrix.mjs          # 19 项只读工具逐个真调（不含写/联网/收费工具）
 node test/bridge-smoke.mjs --call media_probe --args '{\"root_id\":\"huashu\",\"relative_path\":\"output/五险一金_生活物件科普_终版.mp4\"}'
 ```
 
