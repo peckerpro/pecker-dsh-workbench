@@ -93,6 +93,14 @@ harness.log: warn pecker-dsh-workbench: ctx.tools 不可用，27 个工具未注
 
 **看板同步注意**：平台新增 stage 后要跑一次 `POST /api/runtimes/discover` 才会进 registry（API 读的是持久行，不会自己重扫）。
 
+## 1.4 0.1.5：limitations 跟上平台（extract_audio / 门禁）+ 安装流程的两个坑
+
+- 平台又新增了 `media.extract_audio`（真实 ffmpeg，默认 16kHz 单声道 PCM，无音轨直接失败），并落地了门禁求值 `GET /api/versions/{id}/gate`；插件的 limitations 文本同步更新。
+- **两个坑（我实际踩到，写在这里省得下次再来）**：
+  1. **装新版本前不要删旧 tgz**：profile 的依赖 spec 仍指向旧文件时，pnpm 会解析失败，`dsh plugin add` 看起来"什么都没发生"（版本没变）。正确顺序：`dsh plugin --profile web remove <包>` → `add file:<新 tgz>`，或者先留旧 tgz。
+  2. **`profiles/<name>/package.json.lock` 可能是陈旧锁**：报 `atomic-write: timed out waiting for the writer lock` 时，读该文件里的 PID，确认它**已经不是**真正的写者（本次那个 PID 已被回收给一个无关的 `conhost.exe`）再删除；删完安装立刻成功。
+- 平台改了 `runtime/discover.py` 这类模块后，**必须重启 API 再 discover**：Python 已导入的模块不会热更新（本次就遇到"discover 了但工具数还是 5"）。
+
 命令行说明：`DSH Desktop.exe` 是 GUI 子系统程序，直接用 `&`/`Start-Process` 抓不到输出；本机用 `work/dsh-cli.cmd`（`cmd /c` + `ELECTRON_RUN_AS_NODE=1` 转发到 asar 内的 `bin.js`）才是可靠的调用方式。
 
 **为什么需要那行覆盖**：PATH 上的 `python` 是 `D:\anaconda\python.exe`（3.11.9，**没有 `mcp` 包**），而平台业务 MCP 需要 `C:\Python313\python.exe`（3.13.1，有 `mcp`）。若沿用默认 `python`，重启后桥接会如实变成 `unavailable`、0 个工具——那是"正确但没用"的状态，所以必须在 profile 覆盖里钉死解释器。
