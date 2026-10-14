@@ -500,9 +500,9 @@ function buildStartCommands(python, projectDir) {
 /** 平台侧真实缺口（随平台进展更新，不许把已修好的继续写成缺）。 */
 const LIMITATIONS = [
   'media.render 未登记 ToolRecord：渲染阶段不可执行',
-  'asr.transcribe / tts.synthesize / tts.align 未登记：ASR 与配音不可执行',
+  'tts.synthesize / tts.align 未登记：配音不可执行（缺火山凭证）',
   'whiteboard.* / huashu.canvas_render|visual_qa|film_gate|deliver 未登记：白板与 Huashu 阶段不可执行',
   '人工审核 0 条：39 个版本全部 awaiting_review，因此门禁一律不允许交付（机器通过 ≠ 人工批准）',
-  '已可执行（供参考）：media.probe / media.extract_clip / media.verify / media.extract_audio / media.burn_subtitle / media.download（仅 plan）',
+  '已可执行（供参考）：media.probe / media.extract_clip / media.verify / media.extract_audio / media.burn_subtitle / asr.transcribe（离线，用本机已缓存模型）/ media.download（仅 plan）',
   '门禁已可求值：GET /api/versions/{id}/gate（红灯阻断交付、黄灯必须带理由、未知不算通过）',
 ]
