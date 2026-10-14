@@ -49,6 +49,7 @@ export function apply(ctx, config) {
 
   const bridge = {
     state: projectDir === '' || projectDir === undefined ? 'unconfigured' : config.bridge ? 'idle' : 'disabled',
+    registered: false,
     toolCount: 0,
     toolNames: [],
     skipped: [],
@@ -103,7 +104,7 @@ export function apply(ctx, config) {
       return json({
         plugin: {
           name: name,
-          version: '0.1.0',
+          version: '0.1.1',
           workbenchId: 'peckerpro/pecker-dsh-workbench',
           root: config.root,
         },
@@ -132,7 +133,8 @@ export function apply(ctx, config) {
     methods: ['POST'],
     requestBody: 'buffered',
     async fetch() {
-      await startBridge('manual-restart')
+      // 手动重启必须是"真重启"：先注销旧工具、断开旧连接，再重连。
+      await startBridge('manual-restart', { force: true })
       return json({ bridge: { ...bridge, toolNames: [...bridge.toolNames], skipped: [...bridge.skipped] } })
     },
   })
@@ -150,9 +152,23 @@ export function apply(ctx, config) {
     client = null
   }, 'pecker-dsh-workbench: bridge lifetime')
 
-  async function startBridge(reason) {
+  async function startBridge(reason, { force = false } = {}) {
     if (projectDir === '' || !config.bridge) return
-    if (bridge.state === 'connecting' || bridge.state === 'ready') return
+    if (bridge.state === 'connecting') return
+    if (bridge.state === 'ready' && !force) return
+    if (force) {
+      for (const dispose of disposers) {
+        try {
+          dispose()
+        } catch {
+          /* 注销失败继续重连 */
+        }
+      }
+      disposers = []
+      client?.close()
+      client = null
+      bridge.registered = false
+    }
     bridge.state = 'connecting'
     bridge.error = null
     const next = new McpStdioClient({
@@ -177,7 +193,9 @@ export function apply(ctx, config) {
           return result
         }),
       })
-      // 先构建、后注册：注册必须在 tools 服务就绪时同步完成，避免异步注册脱离 effect。
+      // 先构建、后注册：注册必须在 tools 服务就绪时同步完成。
+      // 用 registered 标记区分「真的注册过」与「tools 服务没就绪」——不能只因为握手成功就报 ready。
+      let registered = false
       ctx.inject(['tools'], (toolCtx) => {
         for (const definition of definitions) {
           disposers.push(toolCtx.effect(
@@ -185,20 +203,33 @@ export function apply(ctx, config) {
             `pecker-dsh-workbench: tool ${definition.name}`,
           ))
         }
+        registered = true
       })
+      if (!registered) {
+        next.close()
+        bridge.state = 'tools-service-unavailable'
+        bridge.registered = false
+        bridge.toolCount = 0
+        bridge.toolNames = []
+        bridge.error = 'ctx.tools 服务不可用：工具没有注册（平台连接本身正常）'
+        ctx.logger.warn('pecker-dsh-workbench: ctx.tools 不可用，27 个工具未注册')
+        return
+      }
       client?.close()
       client = next
       bridge.state = 'ready'
+      bridge.registered = true
       bridge.toolCount = definitions.length
       bridge.toolNames = definitions.map((definition) => definition.name)
       bridge.skipped = skipped
       bridge.serverInfo = next.serverInfo
       bridge.protocolVersion = next.protocolVersion
       bridge.startedAt = new Date().toISOString()
-      ctx.logger.info(`pecker-dsh-workbench: 已桥接 ${definitions.length} 个平台工具（${reason}）`)
+      ctx.logger.info(`pecker-dsh-workbench: 已注册 ${definitions.length} 个平台工具（${reason}）`)
     } catch (error) {
       next.close()
       bridge.state = 'unavailable'
+      bridge.registered = false
       bridge.toolCount = 0
       bridge.toolNames = []
       bridge.error = error instanceof Error ? error.message : String(error)

@@ -24,6 +24,8 @@
 | 14 | **配置层自检（官方 §8 自测项）** | `dsh --profile web --dump-config` | 产物 `work/dump-config-after-install.txt`：出现 `# == pecker-dsh-workbench` 行，`config.root = !!js dshHomePath('pecker-dsh-workbench')`、`projectDir` 正确；`__dshPluginOwner.workbench: **true**`（整份 dump 里唯一为 true 的插件，说明宿主已把它识别为工作台插件） |
 | 15 | 配置覆盖生效 | 在 profile `cordis.patch.yml` 追加同 id 行后重新 `--dump-config` | 仍是 1 行（later wins per row，不是新增重复），`config` 已带 `python: C:\Python313\python.exe`（产物 `work/dump-config-after-override.txt`） |
 | 16 | **已安装副本能否被宿主加载** | `PECKER_ENTRY=<installed>/dsh/index.js node --import ./test/host-fallback.mjs test/server-entry-smoke.mjs`、`PECKER_CLIENT=<installed>/lib/client.js node test/client-smoke.mjs` | **28 项 + 20 项全部通过**。关键点：已安装副本的 `node_modules` 里**没有** `@deepseek-ai/*`，测试用与 Desktop `host-module-fallback.mjs` 相同的解析回退才能跑通 → 与重启后的真实加载路径一致 |
+| 17 | **0.1.1 加固 + 升级安装** | 重新 `pnpm pack` → `dsh plugin --profile web remove pecker-dsh-workbench` → `add file:…0.1.1.tgz` | 卸载把 bundle 与依赖都摘干净（bundle 列表回到 9 项），再装 0.1.1 成功（`+ pecker-dsh-workbench file:…0.1.1.tgz`、`Packages: +1`）；磁盘上 `node_modules/pecker-dsh-workbench/package.json` = 0.1.1、profile 依赖 spec 指向 0.1.1。**注意**：删除旧 tgz 后直接 `add` 新包会失败（pnpm 要解析 profile 里仍指向旧 tgz 的 spec，报 `ENOENT …0.1.0.tgz`），必须先 `remove` 再 `add`，或保留旧 tgz |
+| 18 | 全量测试（0.1.1） | `check-package` / `server-entry-smoke`（带宿主回退）/ `client-smoke` / `bridge-smoke` | **33 + 28 + 20 项通过 + 真实 MCP 全通过** |
 
 命令行说明：`DSH Desktop.exe` 是 GUI 子系统程序，直接用 `&`/`Start-Process` 抓不到输出；本机用 `work/dsh-cli.cmd`（`cmd /c` + `ELECTRON_RUN_AS_NODE=1` 转发到 asar 内的 `bin.js`）才是可靠的调用方式。
 
@@ -44,6 +46,25 @@
 | 5 | 属于本工作台的会话里能看到 `workbench_*` 工具并调用 | 桥接本身已在第 7–10 项用真实平台验证；未验证的是宿主加载后注册进 `ctx.tools` 这一段 |
 | 6 | 卸载后数据保留 | 规范 §8 |
 | 7 | `dsh --profile web --dump-config` 出现本包插件层 | **已完成**（第 14 项），保留在此仅作对照 |
+
+## 2.1 0.1.0 装进真实 Desktop 后已经实测到的（无需重启就发生了）
+
+2026-10-14 16:47 用 `dsh plugin --profile web add file:…0.1.0.tgz` 安装后，宿主**当场加载了插件**（不是等重启）：
+
+| 证据 | 内容 |
+|---|---|
+| harness 日志 | `%APPDATA%\dsh-desktop\logs\harness.log` 出现 `warn pecker-dsh-workbench: 平台 MCP 不可用，未注册任何工具（startup）：MCP 进程已退出（code=1 …）`（16:49:03）。这是**正确行为**：当时配置里的 `python` 落到 Anaconda 3.11，没有 `mcp` 包 |
+| 配置热加载 | 16:50:53 在 profile `cordis.patch.yml` 追加 `python: C:\Python313\python.exe`；**3 秒后**（16:50:56）插件以新配置重新 apply，桥接成功 |
+| 真机进程 | `C:\Python313\python.exe -m workbench.mcp` 子进程常驻（PID 32904），证明 stdio MCP 由宿主进程真的拉起来了 |
+| 工作台身份落盘 | `%APPDATA%\dsh-desktop\harness\desktop-workbenches\state.json`：`"added":["peckerpro/pecker-dsh-workbench"]`、`"pinned":["peckerpro/pecker-dsh-workbench"]` → 客户端注册成功且已固定在侧栏切换器里；`sessionBindings` 仍为空（还没建过工作台会话） |
+| 路由实测 | 带 GUI token 换取的会话 cookie 请求 `GET /api/pecker-dsh-workbench/status` → 200，`bridge.state=ready`、`toolCount=27`、27 个 `workbench_*` 名字齐全、`skipped=[]`、`serverInfo={workbench,1.26.0}`、`protocolVersion=2025-11-25` |
+| 平台联通 | 起平台后同一路由返回 `platform.reachable=true`、`health.status=ok`、`dashboard.reachable=true/200`、真实计数 `asset=2228 version=39 job=117 issue=84 tool=4`、`awaiting_review=39`、最近 5 条作业 |
+
+**两个必须记住的运行时事实**：
+
+1. **改配置能热加载，换代码不能**：16:50:53 改 `cordis.patch.yml` 触发了插件重新 apply（配置生效）；但把磁盘上的包换成 0.1.1 之后再改配置文件，`/status` 仍报 `0.1.0`（Node ESM 以同一路径缓存模块，profile bundle 层只在启动时合成）。**所以 0.1.1 必须重启 Desktop 才会生效。**
+2. **0.1.0 的 ready 只是"桥接成功"，不等于"注册成功"**：0.1.0 在 `ctx.inject(['tools'], …)` 之后无条件置 `ready`；若 `tools` 服务没就绪，回调不执行但状态照样是 ready。**0.1.1 增加了 `bridge.registered` 字段**，只有真正走到 `tools.register` 才为 true；同时 `/bridge/restart` 改成"真重启"（先注销旧工具、断开旧连接）。重启后请以 `registered: true` 为准。
+
 
 ## 3. 规范 §8 自测清单对照
 
