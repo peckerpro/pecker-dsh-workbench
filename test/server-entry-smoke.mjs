@@ -13,7 +13,10 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const entry = await import(pathToFileURL(resolve(here, '..', 'dsh', 'index.js')).href)
+// PECKER_ENTRY 指向已安装副本时，本测试同时验证"装进 profile 的那份文件"可用。
+const entryPath = process.env.PECKER_ENTRY ?? resolve(here, '..', 'dsh', 'index.js')
+const entry = await import(pathToFileURL(entryPath).href)
+console.log(`# entry: ${entryPath}`)
 
 const failures = []
 const results = []

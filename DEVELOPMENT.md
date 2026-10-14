@@ -18,21 +18,32 @@
 | 8 | **27 个工具与历史记录一致** | 同上 | 实测 27，与 `outputs/workbench/mcp-verification-2026-10-13.json` 名称集合完全一致（新增 [] 缺失 []） |
 | 9 | **27 个工具全部映射成 ToolDefinition** | 同上 | 27/27，0 跳过；名称唯一、均带 `workbench_` 前缀、≤64 字符；每个都有原始 JSON Schema 参数、`output.render`、`execute` |
 | 10 | **真实工具调用（execute 全链路）** | `node test/bridge-smoke.mjs --call media_probe --args '{...}'` | `media_probe` 返回真实 ffprobe 结果（11,217 字符，`full_decode.exit_code=0`），`isError=false` |
-| 11 | 打包 | `pnpm pack` | `pecker-dsh-workbench-0.1.0.tgz`，16,301 B；内含 `package.json` / `cordis.patch.yml` / `dsh/index.js` / `lib/client.js` / `lib/mcp-bridge.mjs` / `lib/tool-defs.mjs` / `README.md` / `LICENSE`；**不含 `test/`、不含 `node_modules/`** |
+| 11 | 打包 | `pnpm pack` | `pecker-dsh-workbench-0.1.0.tgz`，16,301 B；内含 `package.json` / `cordis.patch.yml` / `dsh/index.js` / `lib/client.js` / `lib/mcp-bridge.mjs` / `lib/tool-defs.mjs` / `README.md` / `LICENSE`；**不含 `test/`、不含 `node_modules/`**；sha256 `6ccde4d96f598aa74eedf757c1981f9c0136a8feb95db093a436b33497b427b6` |
+| 12 | 客户端 bundle 冒烟 | `node test/client-smoke.mjs` | **20 项通过**：`window.__ModuleLoader__.load` 形态、模块 id = 包名、只 require `react`、`apply()` 交给 `ctx.effect` 注销、注册描述符满足宿主真实校验（GitHub URL / customFrame 布尔 / businessSide / businessWidth∈[0.25,0.7] / icon≤2 字符）、把宿主 `conversation` 节点放进布局、无会话时给引导、不重建聊天容器 |
+| 13 | **真实安装** | 见 README §2 的 `dsh plugin --profile web add file:<tgz>` | pnpm 输出 `+ pecker-dsh-workbench file:...tgz`、`Packages: +1`；profile 的 `dependencies` 与 `dsh.profile.bundles` 均新增本包；`profiles/web/node_modules/pecker-dsh-workbench/` 就位（`dsh/ lib/ cordis.patch.yml LICENSE package.json README.md`） |
+| 14 | **配置层自检（官方 §8 自测项）** | `dsh --profile web --dump-config` | 产物 `work/dump-config-after-install.txt`：出现 `# == pecker-dsh-workbench` 行，`config.root = !!js dshHomePath('pecker-dsh-workbench')`、`projectDir` 正确；`__dshPluginOwner.workbench: **true**`（整份 dump 里唯一为 true 的插件，说明宿主已把它识别为工作台插件） |
+| 15 | 配置覆盖生效 | 在 profile `cordis.patch.yml` 追加同 id 行后重新 `--dump-config` | 仍是 1 行（later wins per row，不是新增重复），`config` 已带 `python: C:\Python313\python.exe`（产物 `work/dump-config-after-override.txt`） |
+| 16 | **已安装副本能否被宿主加载** | `PECKER_ENTRY=<installed>/dsh/index.js node --import ./test/host-fallback.mjs test/server-entry-smoke.mjs`、`PECKER_CLIENT=<installed>/lib/client.js node test/client-smoke.mjs` | **28 项 + 20 项全部通过**。关键点：已安装副本的 `node_modules` 里**没有** `@deepseek-ai/*`，测试用与 Desktop `host-module-fallback.mjs` 相同的解析回退才能跑通 → 与重启后的真实加载路径一致 |
+
+命令行说明：`DSH Desktop.exe` 是 GUI 子系统程序，直接用 `&`/`Start-Process` 抓不到输出；本机用 `work/dsh-cli.cmd`（`cmd /c` + `ELECTRON_RUN_AS_NODE=1` 转发到 asar 内的 `bin.js`）才是可靠的调用方式。
+
+**为什么需要那行覆盖**：PATH 上的 `python` 是 `D:\anaconda\python.exe`（3.11.9，**没有 `mcp` 包**），而平台业务 MCP 需要 `C:\Python313\python.exe`（3.13.1，有 `mcp`）。若沿用默认 `python`，重启后桥接会如实变成 `unavailable`、0 个工具——那是"正确但没用"的状态，所以必须在 profile 覆盖里钉死解释器。
 
 测试用到的 `node_modules/@deepseek-ai/{schemastery,cosmokit}` 是从 `app.asar` 提取的宿主包副本，仅供本机跑测试；安装到 Desktop 后由宿主 `host-module-fallback.mjs` 提供解析。
 
-## 2. 尚未实测（需要安装 + 重启 Desktop，由用户执行）
+## 2. 尚未实测（**只差一次重启**）
 
-| # | 项 | 为什么没做 |
+包已装进 `profiles/web`、配置层已自检通过、已安装副本在宿主回退下可加载。剩余项都需要 Desktop 重启（profile bundle 只在启动时合成），重启会结束当时的会话：
+
+| # | 项 | 说明 |
 |---|---|---|
-| 1 | `dsh plugin --profile web add file:<tgz>` 真实安装 | 会改写 profile 配置并要求重启 Desktop，会终止当前会话；命令已按真实 CLI 语法写好（见 README） |
-| 2 | 侧栏出现「本地创作」、面板可进入、不遮挡宿主入口 | 同上 |
-| 3 | `desktop-workbenches/state.json` 的会话归属记录 | 同上 |
-| 4 | 在真实会话里看到 `workbench_*` 工具 | 同上（**桥接本身已在第 7–10 项用真实平台验证过；未验证的是宿主加载后注册进 `ctx.tools` 这一段**） |
-| 5 | 卸载后数据保留 | 同上 |
-
-这些项一律标注为**未实测**，不得在未做之前记为通过。
+| 1 | 侧栏模式切换器出现「本地创作」 | 需要宿主客户端加载本插件并完成 `desktopWorkbenches.register` |
+| 2 | 面板可进入、不遮挡侧栏/市场/管理入口、窄窗口正常 | 界面边界（规范 §4） |
+| 3 | 面板显示平台真实状态 | 平台 API 未起时应显示「未连接」+ 真实原因 |
+| 4 | `desktop-workbenches/state.json` 的会话归属 | 工作台模式新建会话后写入 `sessionBindings`；切到「原生会话」不可见、切回来可见 |
+| 5 | 属于本工作台的会话里能看到 `workbench_*` 工具并调用 | 桥接本身已在第 7–10 项用真实平台验证；未验证的是宿主加载后注册进 `ctx.tools` 这一段 |
+| 6 | 卸载后数据保留 | 规范 §8 |
+| 7 | `dsh --profile web --dump-config` 出现本包插件层 | **已完成**（第 14 项），保留在此仅作对照 |
 
 ## 3. 规范 §8 自测清单对照
 
