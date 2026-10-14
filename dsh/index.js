@@ -14,6 +14,7 @@
  *   - @deepseek-ai/dsh-mcp-client 的真实工具桥接形状（parameters 用原始 JSON Schema）
  */
 import Schema from '@deepseek-ai/schemastery'
+import { spawn } from 'node:child_process'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -31,6 +32,14 @@ export const Config = Schema.object({
   projectDir: Schema.string().default(''),
   /** 启动业务 MCP 用的 Python；留空则用 PATH 上的 python。 */
   python: Schema.string().default(''),
+  /** 跑平台守护进程用的真 node；留空则自动解析（PATH → 自身 → Electron as node）。 */
+  nodePath: Schema.string().default(''),
+  /**
+   * 是否允许插件**自动**拉起平台守护进程（/status 发现不可达时）。
+   * 手动按钮（/platform/start|restart）不受此开关限制——那是用户明确的动作。
+   * 测试里必须关掉：自动自愈会真的 spawn 进程，测试不该有这种副作用。
+   */
+  managePlatform: Schema.boolean().default(true),
   platformBaseUrl: Schema.string().default('http://127.0.0.1:8765'),
   dashboardUrl: Schema.string().default('http://127.0.0.1:5173'),
   /** 是否桥接平台工具（关掉只保留面板与状态读取）。 */
@@ -46,6 +55,16 @@ const BOARD_PATH = `${PREFIX}/board.js`
 const PLATFORM_PREFIX = `${PREFIX}/platform`
 /** 等 ctx.tools 就绪多久之后提醒一次（只提醒，不关连接、不放弃）。 */
 const PENDING_WARN_MS = 30_000
+/**
+ * 平台自愈节流：面板每几秒就拉一次 /status，如果不节流就会不停 spawn 守护进程。
+ *
+ * 为什么插件要管平台生死（2026-10-15 真实故障）：
+ *   平台 API/前端曾被一个控制台中断事件（cmd.exe 的 `^C`）打死，面板如实显示"未连接"，
+ *   但用户没有办法在面板里把它拉起来。现在改成：/status 发现不可达 → 启动**无控制台**的守护进程
+ *   （deploy/workbench-supervisor.mjs），由它负责把服务带起来并持续看护。
+ *   守护进程是 detached 的，Desktop 重启不会带走它；即使被带走，下次插件加载又会补上。
+ */
+const ENSURE_THROTTLE_MS = 20_000
 
 /**
  * 插件版本：**从 package.json 读**，不要手写。
@@ -67,6 +86,24 @@ export function apply(ctx, config) {
   const python = (typeof config.python === 'string' && config.python.trim().length > 0 ? config.python.trim() : '') || 'python'
   const platformBaseUrl = config.platformBaseUrl.replace(/\/+$/, '')
   const dashboardUrl = config.dashboardUrl.replace(/\/+$/, '')
+  const deployDir = projectDir === '' ? '' : join(projectDir, 'deploy')
+  const runDir = projectDir === '' ? '' : join(projectDir, 'work', 'run')
+  const supervisorScript = deployDir === '' ? '' : join(deployDir, 'workbench-supervisor.mjs')
+  const supervisorStarter = deployDir === '' ? '' : join(deployDir, 'start-supervisor.mjs')
+  const supervisorStateFile = runDir === '' ? '' : join(runDir, 'supervisor-state.json')
+  const supervisorLogFile = runDir === '' ? '' : join(runDir, 'supervisor.log')
+
+  /** 平台进程生命周期（自愈）的运行时状态，通过 /status 如实暴露。 */
+  const lifecycle = {
+    supervisorScript,
+    supervisorScriptExists: supervisorScript !== '' && existsSync(supervisorScript),
+    lastStartAt: null,
+    lastStartResult: null,
+    lastEnsureAt: null,
+    lastEnsureReason: null,
+    error: null,
+  }
+  let lastEnsureAtMs = 0
 
   const bridge = {
     // state 语义（0.1.2 起）：
@@ -133,6 +170,9 @@ export function apply(ctx, config) {
         probeJson(`${platformBaseUrl}/api/jobs?limit=5`, { retryWithoutQuery: `${platformBaseUrl}/api/jobs` }),
         probeHead(dashboardUrl),
       ])
+      // 平台不可达就顺手自愈（有节流，不阻塞本次响应）。这样"重启 Desktop 后面板未连接"
+      // 不需要用户做任何事：下一次轮询就会把守护进程拉起来。
+      if (!health.ok && config.managePlatform) void ensurePlatform('status-unreachable')
       return json({
         plugin: {
           name: name,
@@ -140,7 +180,7 @@ export function apply(ctx, config) {
           workbenchId: 'peckerpro/pecker-dsh-workbench',
           root: config.root,
         },
-        config: { projectDir, platformBaseUrl, dashboardUrl, python },
+        config: { projectDir, platformBaseUrl, dashboardUrl, python, nodePath: config.nodePath },
         platform: {
           reachable: health.ok,
           error: health.ok ? null : health.error,
@@ -150,6 +190,7 @@ export function apply(ctx, config) {
           overviewError: overview.ok ? null : overview.error,
           recentJobs: jobs.ok ? pickJobs(jobs.body) : [],
           jobsError: jobs.ok ? null : jobs.error,
+          supervisor: supervisorInfo(),
         },
         dashboard: { url: dashboardUrl, reachable: dashboard.reachable, status: dashboard.status, error: dashboard.error },
         bridge: { ...bridge, toolNames: [...bridge.toolNames], skipped: [...bridge.skipped] },
@@ -168,6 +209,47 @@ export function apply(ctx, config) {
       // 手动重启必须是"真重启"：先注销旧工具、断开旧连接，再重连。
       await startBridge('manual-restart', { force: true })
       return json({ bridge: { ...bridge, toolNames: [...bridge.toolNames], skipped: [...bridge.skipped] } })
+    },
+  })
+
+  // ---------------- 平台进程生命周期（自愈）----------------
+  // 面板上的「启动平台 / 重启平台」按钮打这两个入口。它们只做一件事：
+  // 以**无控制台、脱离本会话**的方式拉起 deploy/workbench-supervisor.mjs，
+  // 由守护进程负责把 api/web 带起来并持续看护（重启 Desktop 也不会带走它）。
+  ctx.connection.fetch.register({
+    path: `${PREFIX}/platform/start`,
+    methods: ['POST'],
+    requestBody: 'buffered',
+    async fetch() {
+      const result = await ensurePlatform('manual-start', { force: true })
+      const health = await probeJson(`${platformBaseUrl}/api/health`)
+      return json({
+        action: 'start',
+        result,
+        reachable: health.ok,
+        error: health.ok ? null : health.error,
+        supervisor: supervisorInfo(),
+      })
+    },
+  })
+
+  ctx.connection.fetch.register({
+    path: `${PREFIX}/platform/restart`,
+    methods: ['POST'],
+    requestBody: 'buffered',
+    async fetch() {
+      // 先停（守护进程会随 --stop 一起退出），再重新拉起守护进程。
+      const stopped = await stopSupervisor()
+      const result = await ensurePlatform('manual-restart', { force: true })
+      const health = await probeJson(`${platformBaseUrl}/api/health`)
+      return json({
+        action: 'restart',
+        stopped,
+        result,
+        reachable: health.ok,
+        error: health.ok ? null : health.error,
+        supervisor: supervisorInfo(),
+      })
     },
   })
 
@@ -295,7 +377,12 @@ export function apply(ctx, config) {
       }
       response.writeHead(502, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
       response.end(JSON.stringify({
-        detail: `平台反代失败：${target.pathname}${target.search}`,
+        // 看板直接把这句显示给用户，所以这里写"怎么办"，而不是只有一句"反代失败"。
+        // 2026-10-15 实际反馈：只显示「平台反代失败：/api/overview」时用户不知道发生了什么。
+        detail: `平台 API（${platformBaseUrl}）当前不可达，读不到 ${target.pathname}${target.search}。`
+          + '点面板上的「启动平台」即可拉起（由无控制台守护进程看护）；也可在状态栏展开看守护日志。',
+        path: `${target.pathname}${target.search}`,
+        upstream: platformBaseUrl,
         error: error instanceof Error ? error.message : String(error),
       }))
     }
@@ -432,6 +519,167 @@ export function apply(ctx, config) {
     }
   }
 
+  /**
+   * 解析"用哪个 node 去跑守护进程"。
+   * 优先用户配置；然后 PATH 里的真 node；自己就是 node 就用自己的；
+   * 都不行就回退 Electron + ELECTRON_RUN_AS_NODE=1（能跑，只是多一层壳）。
+   */
+  function resolveSupervisorNode() {
+    const configured = typeof config.nodePath === 'string' ? config.nodePath.trim() : ''
+    if (configured !== '' && existsSync(configured)) return { command: configured, env: {}, basis: 'config.nodePath' }
+    if (/^node(\.exe)?$/i.test(process.execPath.split(/[\\/]/).pop() ?? '')) {
+      return { command: process.execPath, env: {}, basis: 'self' }
+    }
+    for (const dir of String(process.env.PATH ?? '').split(';')) {
+      const trimmed = dir.trim()
+      if (trimmed === '') continue
+      const candidate = join(trimmed, 'node.exe')
+      try {
+        if (existsSync(candidate)) return { command: candidate, env: {}, basis: `PATH:${trimmed}` }
+      } catch {
+        /* 不可读的 PATH 项跳过 */
+      }
+    }
+    return { command: process.execPath, env: { ELECTRON_RUN_AS_NODE: '1' }, basis: 'electron-as-node' }
+  }
+
+  function readTextTail(file, bytes) {
+    if (file === '') return null
+    try {
+      const raw = readFileSync(file, 'utf8')
+      return raw.length > bytes ? raw.slice(raw.length - bytes) : raw
+    } catch {
+      return null
+    }
+  }
+
+  function readSupervisorState() {
+    if (supervisorStateFile === '') return null
+    try {
+      return JSON.parse(readFileSync(supervisorStateFile, 'utf8'))
+    } catch {
+      return null
+    }
+  }
+
+  function pidAlive(pid) {
+    if (!Number.isInteger(pid) || pid <= 0) return false
+    try {
+      process.kill(pid, 0)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /** 给面板看的守护进程事实：绝不猜，读不到就是读不到。 */
+  function supervisorInfo() {
+    const state = readSupervisorState()
+    const pid = Number.isInteger(state?.supervisorPid) ? state.supervisorPid : null
+    return {
+      scriptExists: lifecycle.supervisorScriptExists,
+      script: supervisorScript === '' ? null : supervisorScript,
+      pid,
+      alive: pid !== null && pidAlive(pid),
+      stateFile: supervisorStateFile === '' ? null : supervisorStateFile,
+      updatedAt: state?.updatedAt ?? null,
+      children: Array.isArray(state?.children) ? state.children : [],
+      logTail: readTextTail(supervisorLogFile, 2_000),
+      lastStartAt: lifecycle.lastStartAt,
+      lastStartResult: lifecycle.lastStartResult,
+      lastEnsureAt: lifecycle.lastEnsureAt,
+      lastEnsureReason: lifecycle.lastEnsureReason,
+      error: lifecycle.error,
+    }
+  }
+
+  function startSupervisor(reason) {
+    if (supervisorStarter === '' || !existsSync(supervisorStarter)) {
+      const error = `找不到守护进程启动器：${supervisorStarter === '' ? '(未配置 projectDir)' : supervisorStarter}`
+      lifecycle.error = error
+      return { started: false, error }
+    }
+    const node = resolveSupervisorNode()
+    try {
+      // detached + stdio ignore：没有控制台、不挂在 harness 的进程会话上。
+      // 这是 2026-10-15 那次 `^C` 事故的直接对策。
+      const child = spawn(node.command, [supervisorStarter], {
+        cwd: projectDir,
+        env: { ...process.env, ...node.env, WORKBENCH_NODE: node.command },
+        detached: true,
+        windowsHide: true,
+        stdio: 'ignore',
+      })
+      child.unref()
+      lifecycle.lastStartAt = new Date().toISOString()
+      lifecycle.lastStartResult = `pid=${child.pid ?? '?'} node=${node.command} (${node.basis})`
+      lifecycle.error = null
+      ctx.logger.info(`pecker-dsh-workbench: 已启动平台守护进程（${reason}）${lifecycle.lastStartResult}`)
+      return { started: true, pid: child.pid ?? null, node: node.command, nodeBasis: node.basis }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      lifecycle.error = message
+      ctx.logger.warn(`pecker-dsh-workbench: 启动平台守护进程失败（${reason}）：${message}`)
+      return { started: false, error: message }
+    }
+  }
+
+  /** 停掉守护进程（--stop 会连带停掉它记录的 api/web）。 */
+  async function stopSupervisor() {
+    if (supervisorScript === '' || !existsSync(supervisorScript)) return { stopped: false, error: '守护进程脚本不存在' }
+    const node = resolveSupervisorNode()
+    return await new Promise((resolve) => {
+      let settled = false
+      const done = (value) => {
+        if (settled) return
+        settled = true
+        resolve(value)
+      }
+      let child
+      try {
+        child = spawn(node.command, [supervisorScript, '--stop'], {
+          cwd: projectDir,
+          env: { ...process.env, ...node.env, WORKBENCH_NODE: node.command },
+          windowsHide: true,
+          stdio: 'ignore',
+        })
+      } catch (error) {
+        done({ stopped: false, error: error instanceof Error ? error.message : String(error) })
+        return
+      }
+      child.on('exit', (code) => done({ stopped: true, exitCode: code }))
+      child.on('error', (error) => done({ stopped: false, error: error.message }))
+      setTimeout(() => done({ stopped: false, error: '停止超时（8s）' }), 8_000)
+    })
+  }
+
+  /**
+   * 保证平台在跑：守护进程不在（或强制）就拉起来。
+   * 守护进程本身是幂等的（有 lock 文件），所以重复调用安全；这里再节流一次避免刷日志。
+   */
+  async function ensurePlatform(reason, { force = false } = {}) {
+    if (projectDir === '') return { attempted: false, reason: '未配置 projectDir' }
+    const info = supervisorInfo()
+    if (info.alive && !force) return { attempted: false, reason: '守护进程已在运行', pid: info.pid }
+    const now = Date.now()
+    if (!force && now - lastEnsureAtMs < ENSURE_THROTTLE_MS) {
+      return { attempted: false, reason: `节流中（${ENSURE_THROTTLE_MS}ms 内只尝试一次）` }
+    }
+    lastEnsureAtMs = now
+    lifecycle.lastEnsureAt = new Date().toISOString()
+    lifecycle.lastEnsureReason = reason
+    const started = startSupervisor(reason)
+    if (started.started) {
+      // 等服务真起来再回报，面板下一次轮询就能看到"已连接"。
+      await sleep(1_500)
+    }
+    return { attempted: true, reason, ...started }
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms))
+  }
+
   function clearPendingWatchdog() {
     if (pendingTimer !== null) {
       clearTimeout(pendingTimer)
@@ -443,6 +691,10 @@ export function apply(ctx, config) {
     // 不 await：桥接失败不能阻塞 Desktop 启动。工具在握手完成后才出现。
     void startBridge('startup')
   }
+
+  // 平台进程自愈与工具桥接是两件事：即使关掉桥接，面板也仍然要能看到真实数据，
+  // 所以这里无条件保证守护进程在跑（不 await，不能拖慢 Desktop 启动）。
+  if (projectDir !== '' && config.managePlatform) void ensurePlatform('plugin-load')
 
   ctx.logger.info(
     `pecker-dsh-workbench: 已加载（projectDir=${projectDir === '' ? '(未配置)' : projectDir}, 路由前缀 ${PREFIX}）`,
@@ -501,8 +753,10 @@ function buildStartCommands(python, projectDir) {
 const LIMITATIONS = [
   'media.render 未登记 ToolRecord：渲染阶段不可执行',
   'tts.synthesize / tts.align 未登记：配音不可执行（缺火山凭证）',
-  'whiteboard.* / huashu.canvas_render|visual_qa|film_gate|deliver 未登记：白板与 Huashu 阶段不可执行',
-  '人工审核 0 条：39 个版本全部 awaiting_review，因此门禁一律不允许交付（机器通过 ≠ 人工批准）',
+  'huashu.storyboard_lint 已登记（分镜 lint 真跑）；huashu.canvas_render|visual_qa|film_gate|deliver 未登记：Huashu 后段阶段仍不可执行',
+  'whiteboard.* 未登记：白板阶段不可执行',
+  '人工审核只能由人在看板/面板里登记（agent 侧只能写 agent_audit，写不了 approved）：没有人工结论前门禁一律不允许交付',
   '已可执行（供参考）：media.probe / media.extract_clip / media.verify / media.extract_audio / media.burn_subtitle / asr.transcribe（离线，用本机已缓存模型）/ media.download（仅 plan）',
   '门禁已可求值：GET /api/versions/{id}/gate（红灯阻断交付、黄灯必须带理由、未知不算通过）',
+  '平台进程由 deploy/workbench-supervisor.mjs 守护（无控制台、detached）；面板「启动/重启平台」与 /status 自愈都走它',
 ]

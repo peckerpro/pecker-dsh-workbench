@@ -57,6 +57,8 @@ const config = entry.Config({
   python: process.env.PECKER_PYTHON || 'C:\\Python313\\python.exe',
   platformBaseUrl: 'http://127.0.0.1:9',
   requestTimeoutMs: 120_000,
+  // 测试不许有副作用：不让插件自动 spawn 平台守护进程（手动端点另有测试）。
+  managePlatform: false,
 })
 entry.apply(ctx, config)
 

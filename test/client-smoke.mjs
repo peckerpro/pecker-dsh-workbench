@@ -151,6 +151,28 @@ try {
 check(!contains(tree, (node) => node?.props?.className === 'dshWbConversation'),
   '没有重建宿主的会话容器（不造第二套聊天界面）')
 
+// ---- 0.1.8 平台生命周期契约（用户实际反馈：重启 Desktop 后"未连接"却无法在面板里恢复）----
+check(source.includes('/platform/${action}') && source.includes("run('start')") && source.includes("run('restart')"),
+  '面板调用插件自己的平台启动/重启端点（而不是让用户去手敲命令）')
+check(contains(tree, (node) => Array.isArray(node?.children) && node.children.includes('启动平台')),
+  '平台未连接时给出「启动平台」按钮（面板内可一键恢复）')
+check(/\busePlatformLifecycle\b/.test(source) && source.includes('lifecycle.pending'),
+  '启动/重启有进行中状态（不出现"点了没反应"）')
+// 未连接时的话术必须是"怎么办"：读不到 ≠ 数据为空，并指向启动按钮。
+check(source.includes('平台没在运行') && source.includes('不是数据为空') && source.includes('守护进程'),
+  '未连接时解释原因 + 指向启动按钮 + 说明守护进程（不是一句原始报错）')
+check(source.includes('supervisor') && source.includes('logTail'),
+  '状态里暴露守护进程事实（pid / alive / 日志尾巴），不猜')
+
+// ---- 0.1.9 会话归属契约（实测：不写 initialization 会沿用当前活动会话，绑错会话）----
+check(/initialization:\s*'new-session'/.test(source),
+  "register 声明 initialization:'new-session'（否则面板沿用当前会话 → 绑到无关会话）")
+check(source.includes('没有"指定 cwd"的字段') || source.includes('工作区'),
+  '注释说明工作台会话落在用户选的工作区（宿主无 cwd 字段）')
+check(contains(tree, (node) => Array.isArray(node?.children) && node.children.includes('新建创作会话')),
+  '头部常驻「新建创作会话」入口（选项目文件夹 → 绑定到本工作台，不靠"当前会话")')
+check(source.includes('newWorkspaceSession'), '走宿主 newWorkspaceSession（弹目录选择并建立工作台归属）')
+
 console.log(lines.join('\n'))
 if (failures.length > 0) {
   console.error(`\n${failures.length} 项失败：\n- ${failures.join('\n- ')}`)

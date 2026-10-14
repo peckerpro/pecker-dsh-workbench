@@ -78,12 +78,15 @@ const ctx = {
 
 entry.apply(ctx, entry.Config(validated.value))
 
-check(routes.size === 4, `注册了 4 条 connection 路由（实际 ${routes.size}）`)
+check(routes.size === 6, `注册了 6 条 connection 路由（实际 ${routes.size}）`)
 for (const path of [
   '/api/pecker-dsh-workbench/ping',
   '/api/pecker-dsh-workbench/config',
   '/api/pecker-dsh-workbench/status',
   '/api/pecker-dsh-workbench/bridge/restart',
+  // 0.1.8 起：平台进程生命周期（面板「启动平台 / 重启平台」打这两个）。
+  '/api/pecker-dsh-workbench/platform/start',
+  '/api/pecker-dsh-workbench/platform/restart',
 ]) {
   check(routes.has(path), `路由存在：${path}`)
 }
@@ -149,6 +152,39 @@ check(Array.isArray(status2.startCommands) && status2.startCommands.length === 4
 // MCP 失败时不得去注册工具；但看板/反代路由与 MCP 无关，仍应注册（否则面板连状态都看不到）。
 check(!injected2.some((deps) => deps.includes('tools')), 'MCP 不可用时不尝试注入 tools')
 check(webRoutes2.length === 2, `MCP 不可用时仍托管看板与反代（实际 ${webRoutes2.length} 条）`)
+
+// ---- 平台进程生命周期（0.1.8）----
+// 目的：面板能在插件里一键启动/重启平台，并且**测试不许真的 spawn 进程**。
+check(status2.platform?.supervisor !== undefined && status2.platform.supervisor !== null,
+  '/status 暴露 platform.supervisor（守护进程事实，不猜）')
+check(status2.platform.supervisor.scriptExists === false,
+  `未装守护脚本时如实报 scriptExists=false（实际 ${status2.platform.supervisor.scriptExists}）`)
+check(status2.platform.supervisor.alive === false, '守护进程未运行时 alive=false（不假装在跑）')
+
+const startRoute = routes2.get('/api/pecker-dsh-workbench/platform/start')
+const startBody = await (await startRoute.fetch(new Request('http://x/platform/start', { method: 'POST' }))).json()
+check(startBody.action === 'start', `手动启动端点回 action=start（实际 ${startBody.action}）`)
+check(startBody.result?.attempted === true, '手动启动会真的去尝试（不受自动自愈开关限制）')
+check(startBody.result?.started === false && typeof startBody.result.error === 'string',
+  `找不到守护脚本时如实失败并给原因（实际 ${String(startBody.result?.error).slice(0, 40)}…）`)
+check(startBody.supervisor !== undefined, '手动启动端点一并回报 supervisor 状态')
+
+const restartRoute = routes2.get('/api/pecker-dsh-workbench/platform/restart')
+const restartBody = await (await restartRoute.fetch(new Request('http://x/platform/restart', { method: 'POST' }))).json()
+check(restartBody.action === 'restart', `手动重启端点回 action=restart（实际 ${restartBody.action}）`)
+check(restartBody.stopped !== undefined, '重启端点回报停止结果（先停再起）')
+// 自动自愈必须可关（测试环境绝不能被插件悄悄拉起真进程）。
+const configOff = entry.Config({
+  root: 'C:\\tmp\\pecker-workbench',
+  projectDir: dirname(resolve(here, '..')),
+  platformBaseUrl: 'http://127.0.0.1:9',
+  requestTimeoutMs: 1_000,
+  bridge: false,
+  managePlatform: false,
+})
+check(configOff.managePlatform === false, 'managePlatform 可显式关闭（测试无副作用）')
+check(entry.Config({ root: 'C:\\tmp\\x', projectDir: 'C:\\tmp\\x' }).managePlatform === true,
+  'managePlatform 默认为真（用户环境默认自愈）')
 
 console.log('# 服务端入口冒烟测试')
 console.log(results.join('\n'))

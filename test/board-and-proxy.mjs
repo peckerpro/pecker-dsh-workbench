@@ -75,6 +75,7 @@ const boardSize = statSync(boardFile).size
     platformBaseUrl: platformApi,
     requestTimeoutMs: 30_000,
     bridge: false, // 这一轮只验证 web 层，不拉起 MCP
+    managePlatform: false, // 测试不许有副作用：不自动 spawn 平台守护进程
   }))
   const server = serverFor(webRoutes)
   await new Promise((done) => server.listen(0, '127.0.0.1', done))
@@ -146,6 +147,8 @@ const boardSize = statSync(boardFile).size
     platformBaseUrl: 'http://127.0.0.1:9',
     requestTimeoutMs: 3_000,
     bridge: false,
+    // 测试不许有副作用：不让插件自动 spawn 平台守护进程。
+    managePlatform: false,
   }))
   const server = serverFor(webRoutes)
   await new Promise((done) => server.listen(0, '127.0.0.1', done))
@@ -153,7 +156,12 @@ const boardSize = statSync(boardFile).size
   const response = await fetch(`${origin}/api/pecker-dsh-workbench/platform/api/health`)
   const body = await response.json().catch(() => null)
   check(response.status === 502, `平台不可达时反代返回 502（实际 ${response.status}）`)
-  check(typeof body?.detail === 'string' && body.detail.includes('平台反代失败'), '502 带可读原因（不伪装成功）')
+  // 0.1.8 起：502 的 detail 必须是"怎么办"，不能再是一句干巴巴的「平台反代失败」
+  // （实际用户反馈：只看到「平台反代失败：/api/overview」时不知道发生了什么）。
+  check(typeof body?.detail === 'string' && body.detail.includes('不可达') && body.detail.includes('启动平台'),
+    `502 detail 给出可执行指引（实际：${String(body?.detail).slice(0, 56)}…）`)
+  check(body?.path === '/api/health', `502 带真实上游路径（实际 ${body?.path}）`)
+  check(typeof body?.error === 'string' && body.error.length > 0, '502 带原始错误（不吞异常）')
   await new Promise((done) => server.close(done))
 }
 
