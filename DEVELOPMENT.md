@@ -86,6 +86,13 @@ harness.log: warn pecker-dsh-workbench: ctx.tools 不可用，27 个工具未注
 **未处理的 'error' 事件**（真机上会崩掉整个 harness 进程）。现在 `body.on('error')` 收口、只在
 "响应未正常结束"时 abort，并且客户端主动断开不再误报 502。这个 bug 是测试真去取消 SSE 流才暴露的。
 
+## 1.3 0.1.4：版本自报单一真源 + limitations 跟随平台进展
+
+- **`/status` 的 `plugin.version` 改为从 `package.json` 读**：0.1.3 时它仍手写 `0.1.2`，出现"装的是 0.1.3、自报 0.1.2"的漂移。自报版本只能有一个真源。
+- **limitations 更新**：平台新增了 `media.burn_subtitle`（2026-10-14，真实 ffmpeg+libass 实现），面板里不再把它列为缺口；仍缺的是 `media.render`、`asr.*`、`tts.*`、`whiteboard.*`、`huashu.canvas_render|visual_qa|film_gate|deliver`，以及平台侧没有 gate 求值、人工审核 0 条。
+
+**看板同步注意**：平台新增 stage 后要跑一次 `POST /api/runtimes/discover` 才会进 registry（API 读的是持久行，不会自己重扫）。
+
 命令行说明：`DSH Desktop.exe` 是 GUI 子系统程序，直接用 `&`/`Start-Process` 抓不到输出；本机用 `work/dsh-cli.cmd`（`cmd /c` + `ELECTRON_RUN_AS_NODE=1` 转发到 asar 内的 `bin.js`）才是可靠的调用方式。
 
 **为什么需要那行覆盖**：PATH 上的 `python` 是 `D:\anaconda\python.exe`（3.11.9，**没有 `mcp` 包**），而平台业务 MCP 需要 `C:\Python313\python.exe`（3.13.1，有 `mcp`）。若沿用默认 `python`，重启后桥接会如实变成 `unavailable`、0 个工具——那是"正确但没用"的状态，所以必须在 profile 覆盖里钉死解释器。

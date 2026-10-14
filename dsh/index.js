@@ -47,6 +47,19 @@ const PLATFORM_PREFIX = `${PREFIX}/platform`
 /** 等 ctx.tools 就绪多久之后提醒一次（只提醒，不关连接、不放弃）。 */
 const PENDING_WARN_MS = 30_000
 
+/**
+ * 插件版本：**从 package.json 读**，不要手写。
+ * 手写过一次 0.1.2，结果装的是 0.1.3 而 /status 自报 0.1.2 —— 自报版本必须只有一个真源。
+ */
+const PLUGIN_VERSION = (() => {
+  try {
+    const raw = readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8')
+    return JSON.parse(raw).version ?? 'unknown'
+  } catch {
+    return 'unknown'
+  }
+})()
+
 export function apply(ctx, config) {
   const projectDir = typeof config.projectDir === 'string' ? config.projectDir.trim() : ''
   const platformDir = projectDir === '' ? '' : join(projectDir, 'platform')
@@ -123,7 +136,7 @@ export function apply(ctx, config) {
       return json({
         plugin: {
           name: name,
-          version: '0.1.2',
+          version: PLUGIN_VERSION,
           workbenchId: 'peckerpro/pecker-dsh-workbench',
           root: config.root,
         },
@@ -484,11 +497,12 @@ function buildStartCommands(python, projectDir) {
   ]
 }
 
-/** 本轮审计核实过的事实：这些 stage 在平台里没有登记，不能假装可用。 */
+/** 平台侧真实缺口（随平台进展更新，不许把已修好的继续写成缺）。 */
 const LIMITATIONS = [
-  'media.render / media.burn_subtitle 未登记 ToolRecord：渲染与字幕阶段不可执行',
+  'media.render 未登记 ToolRecord：渲染阶段不可执行',
   'asr.transcribe / tts.synthesize / tts.align 未登记：ASR 与配音不可执行',
   'whiteboard.* / huashu.canvas_render|visual_qa|film_gate|deliver 未登记：白板与 Huashu 阶段不可执行',
   '平台侧没有 gate 求值实现：红灯/黄灯目前只是 recipe 里的字符串标签',
   '人工审核 0 条：39 个版本仍全部是 awaiting_review',
+  '已可执行（供参考）：media.probe / media.extract_clip / media.verify / media.burn_subtitle（2026-10-14 新增）/ media.download（仅 plan）',
 ]
