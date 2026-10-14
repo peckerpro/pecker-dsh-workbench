@@ -38,6 +38,8 @@ export const Config = Schema.object({
 
 const PREFIX = '/api/pecker-dsh-workbench'
 const PROBE_TIMEOUT_MS = 3_000
+/** 等 ctx.tools 就绪多久之后提醒一次（只提醒，不关连接、不放弃）。 */
+const PENDING_WARN_MS = 30_000
 
 export function apply(ctx, config) {
   const projectDir = typeof config.projectDir === 'string' ? config.projectDir.trim() : ''
@@ -48,18 +50,29 @@ export function apply(ctx, config) {
   const dashboardUrl = config.dashboardUrl.replace(/\/+$/, '')
 
   const bridge = {
+    // state 语义（0.1.2 起）：
+    //   unconfigured / disabled   —— 没配置或关掉了
+    //   idle                      —— 还没开始
+    //   connecting                —— 正在连平台 MCP
+    //   connected                 —— 平台连接已建立，但 ctx.tools 还没就绪（工具未注册）
+    //   ready                     —— 工具已真正注册进 ctx.tools
+    //   unavailable               —— 平台连接失败
     state: projectDir === '' || projectDir === undefined ? 'unconfigured' : config.bridge ? 'idle' : 'disabled',
     registered: false,
+    registrationPending: false,
     toolCount: 0,
     toolNames: [],
     skipped: [],
     error: null,
+    note: null,
     serverInfo: null,
     protocolVersion: null,
-    startedAt: null,
+    connectedAt: null,
+    registeredAt: null,
   }
   let client = null
-  let disposers = []
+  let registrationFiber = null
+  let pendingTimer = null
 
   ctx.connection.fetch.register({
     path: `${PREFIX}/ping`,
@@ -104,7 +117,7 @@ export function apply(ctx, config) {
       return json({
         plugin: {
           name: name,
-          version: '0.1.1',
+          version: '0.1.2',
           workbenchId: 'peckerpro/pecker-dsh-workbench',
           root: config.root,
         },
@@ -140,14 +153,13 @@ export function apply(ctx, config) {
   })
 
   ctx.effect(() => () => {
-    for (const dispose of disposers) {
-      try {
-        dispose()
-      } catch {
-        /* 注销失败不影响卸载 */
-      }
+    clearPendingWatchdog()
+    try {
+      registrationFiber?.dispose?.()
+    } catch {
+      /* 注销失败不影响卸载 */
     }
-    disposers = []
+    registrationFiber = null
     client?.close()
     client = null
   }, 'pecker-dsh-workbench: bridge lifetime')
@@ -155,22 +167,25 @@ export function apply(ctx, config) {
   async function startBridge(reason, { force = false } = {}) {
     if (projectDir === '' || !config.bridge) return
     if (bridge.state === 'connecting') return
-    if (bridge.state === 'ready' && !force) return
+    if ((bridge.state === 'ready' || bridge.state === 'connected') && !force) return
     if (force) {
-      for (const dispose of disposers) {
-        try {
-          dispose()
-        } catch {
-          /* 注销失败继续重连 */
-        }
+      clearPendingWatchdog()
+      try {
+        registrationFiber?.dispose?.()
+      } catch {
+        /* 注销失败继续重连 */
       }
-      disposers = []
+      registrationFiber = null
       client?.close()
       client = null
       bridge.registered = false
+      bridge.registrationPending = false
+      bridge.toolCount = 0
+      bridge.toolNames = []
     }
     bridge.state = 'connecting'
     bridge.error = null
+    bridge.note = null
     const next = new McpStdioClient({
       command: python,
       args: ['-m', 'workbench.mcp'],
@@ -193,47 +208,85 @@ export function apply(ctx, config) {
           return result
         }),
       })
-      // 先构建、后注册：注册必须在 tools 服务就绪时同步完成。
-      // 用 registered 标记区分「真的注册过」与「tools 服务没就绪」——不能只因为握手成功就报 ready。
-      let registered = false
-      ctx.inject(['tools'], (toolCtx) => {
-        for (const definition of definitions) {
-          disposers.push(toolCtx.effect(
-            () => toolCtx.tools.register(definition),
-            `pecker-dsh-workbench: tool ${definition.name}`,
-          ))
-        }
-        registered = true
-      })
-      if (!registered) {
-        next.close()
-        bridge.state = 'tools-service-unavailable'
-        bridge.registered = false
-        bridge.toolCount = 0
-        bridge.toolNames = []
-        bridge.error = 'ctx.tools 服务不可用：工具没有注册（平台连接本身正常）'
-        ctx.logger.warn('pecker-dsh-workbench: ctx.tools 不可用，27 个工具未注册')
-        return
-      }
-      client?.close()
+      const previous = client
       client = next
-      bridge.state = 'ready'
-      bridge.registered = true
-      bridge.toolCount = definitions.length
-      bridge.toolNames = definitions.map((definition) => definition.name)
+      previous?.close()
+      bridge.state = 'connected'
+      bridge.registered = false
+      bridge.registrationPending = true
       bridge.skipped = skipped
       bridge.serverInfo = next.serverInfo
       bridge.protocolVersion = next.protocolVersion
-      bridge.startedAt = new Date().toISOString()
-      ctx.logger.info(`pecker-dsh-workbench: 已注册 ${definitions.length} 个平台工具（${reason}）`)
+      bridge.connectedAt = new Date().toISOString()
+
+      // ctx.inject(deps, cb) 不是同步调用：cordis 把它当成一个**子插件**，deps 齐了才 apply
+      // （registry.ts: inject() → plugin({ inject, apply })）。所以绝不能"同步没跑到"就判定
+      // 服务不可用——0.1.1 就是这么误判的，还把平台连接关掉，结果 27 个工具一个都没注册上。
+      // 正确做法：状态更新放进回调里，连接保持打开，等 ctx.tools 真正出现时再注册。
+      registrationFiber = ctx.inject(['tools'], (toolCtx) => {
+        const localDisposers = []
+        toolCtx.effect(() => {
+          for (const definition of definitions) {
+            localDisposers.push(toolCtx.tools.register(definition))
+          }
+          bridge.state = 'ready'
+          bridge.registered = true
+          bridge.registrationPending = false
+          bridge.toolCount = definitions.length
+          bridge.toolNames = definitions.map((definition) => definition.name)
+          bridge.registeredAt = new Date().toISOString()
+          bridge.error = null
+          bridge.note = null
+          clearPendingWatchdog()
+          ctx.logger.info(`pecker-dsh-workbench: 已注册 ${definitions.length} 个平台工具（${reason}）`)
+          return () => {
+            for (const dispose of localDisposers) {
+              try {
+                dispose()
+              } catch {
+                /* 单个注销失败不影响其余 */
+              }
+            }
+            localDisposers.length = 0
+            // 工具随服务一起消失：如实退回 pending，而不是继续报 ready。
+            if (bridge.state === 'ready') {
+              bridge.state = 'connected'
+              bridge.registered = false
+              bridge.registrationPending = true
+              bridge.toolCount = 0
+              bridge.toolNames = []
+              bridge.note = 'ctx.tools 已不可用：工具已注销，等待服务再次就绪'
+            }
+          }
+        }, `pecker-dsh-workbench: ${definitions.length} tools`)
+      })
+
+      // 等待 ctx.tools 的过程中不关连接；超时只记一条 warn（服务可能随后才出现）。
+      pendingTimer = setTimeout(() => {
+        if (bridge.registrationPending) {
+          bridge.note = 'ctx.tools 尚未就绪：工具还没注册（连接保持打开，服务出现后会自动注册）'
+          ctx.logger.warn('pecker-dsh-workbench: ctx.tools 尚未就绪，工具暂未注册（连接保持打开）')
+        }
+      }, PENDING_WARN_MS)
+      if (typeof pendingTimer.unref === 'function') pendingTimer.unref()
+
+      ctx.logger.info(`pecker-dsh-workbench: 已连接平台（${next.protocolVersion}），${definitions.length} 个工具等待 ctx.tools 就绪（${reason}）`)
     } catch (error) {
       next.close()
       bridge.state = 'unavailable'
       bridge.registered = false
+      bridge.registrationPending = false
       bridge.toolCount = 0
       bridge.toolNames = []
       bridge.error = error instanceof Error ? error.message : String(error)
       ctx.logger.warn(`pecker-dsh-workbench: 平台 MCP 不可用，未注册任何工具（${reason}）：${bridge.error}`)
+    }
+  }
+
+  function clearPendingWatchdog() {
+    if (pendingTimer !== null) {
+      clearTimeout(pendingTimer)
+      pendingTimer = null
     }
   }
 

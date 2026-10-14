@@ -30,6 +30,35 @@
 | 20 | **发现并修掉 2 个平台 MCP 缺陷** | 矩阵首轮 18 项里 `roots` 失败、`skills_inspect` 失败 | ① `roots` 恒报 `'function' object has no attribute 'all'`（局部变量被同名工具函数遮蔽）→ 平台侧改名 `root_map`；② 纯 MCP 无法发现 `skill_id` → `skills_list` 增加可选 `provider_id`。修后矩阵 19/19；平台侧新增 `tests/test_mcp_tools_regression.py`（5 项）锁定 |
 | 21 | **自然语言链路端到端（走工作台工具）** | 会话内 `workbench_agents_submit_request` → `workbench_agents_attach_plan(plan_source=dsh_session)` → 执行 | `agentreq_ee2dcd24b6924d3b`：`submitted → planned → executed`；probe `business_status=ok`、`process_exit_code=0`、`qa.full_decode=passed`。这同时补上了"写路径缺证据"这一条 |
 
+## 1.1 重启后暴露的 0.1.1 自身缺陷（0.1.2 已修）
+
+2026-10-14 17:40 用户重启 Desktop（本会话被恢复）。真机立刻证明**我在 0.1.1 里加的"加固"本身是错的**：
+
+```
+harness.log: warn pecker-dsh-workbench: ctx.tools 不可用，27 个工具未注册
+/status: plugin.version=0.1.1  bridge.state=tools-service-unavailable  registered=false  toolCount=0
+         且没有 python -m workbench.mcp 子进程（平台连接被自己的代码关掉了）
+```
+
+**根因**：`ctx.inject(deps, cb)` **不是同步调用**。cordis 把它当成一个**子插件**——
+`registry.ts`：`inject(inject, callback) { return this.plugin({ inject, apply: callback }) }`，deps 齐了才 apply。
+0.1.1 却用"同步没跑到"判定服务不可用，还 `next.close()` 关掉连接 → 27 个工具一个都没注册。
+（也解释了 0.1.0 为什么"看起来"正常：它无条件置 ready，回调稍后跑到，工具照样注册成功。）
+
+**0.1.2 修法**
+- 状态更新放进注入回调里；等待期间**不关连接**，状态 `connected` + `registrationPending=true`；
+- 回调跑到才 `ready` + `registered=true` + `toolCount`，并记 `connectedAt` / `registeredAt`；
+- effect 注销时如实退回 `connected` + pending（不再谎报 ready），带可读 `note`；
+- 等待超过 30 秒只记一条 warn（`ctx.tools 尚未就绪…连接保持打开`），不放弃、不关连接；
+- `/bridge/restart` 先 dispose 注册 fiber 再重连（真重启）；面板按新状态显示（`connected` → "工具待注册（等宿主 tools 服务）"）并展示 `note`。
+
+**新增回归测试** `test/server-entry-deferred.mjs`（**21 项全过**，真平台 MCP + "把 inject 回调存起来"的 mock ctx）：
+握手后必须 connected/pending、无 warn 无 error；手动触发回调后必须 ready + 27 个 `workbench_*`；注销后必须如实退回 pending。
+
+**两条纪律教训**
+1. **别用 PowerShell 5.1 的 `Set-Content`/`Add-Content` 改带中文的源码**：它按 ANSI 读、按 UTF-8 写 → 双重编码。本次把 `dsh/index.js` 写坏（已 `git checkout` 还原并用编辑工具重做），还让 `package.json` 多了 BOM 导致 `JSON.parse` 失败。
+2. pid 追踪要按"端口 + 命令行签名"识别真实进程，否则会杀到已退出的包装进程（本项目已修）。
+
 命令行说明：`DSH Desktop.exe` 是 GUI 子系统程序，直接用 `&`/`Start-Process` 抓不到输出；本机用 `work/dsh-cli.cmd`（`cmd /c` + `ELECTRON_RUN_AS_NODE=1` 转发到 asar 内的 `bin.js`）才是可靠的调用方式。
 
 **为什么需要那行覆盖**：PATH 上的 `python` 是 `D:\anaconda\python.exe`（3.11.9，**没有 `mcp` 包**），而平台业务 MCP 需要 `C:\Python313\python.exe`（3.13.1，有 `mcp`）。若沿用默认 `python`，重启后桥接会如实变成 `unavailable`、0 个工具——那是"正确但没用"的状态，所以必须在 profile 覆盖里钉死解释器。
