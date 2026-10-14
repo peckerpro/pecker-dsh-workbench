@@ -120,6 +120,26 @@ check(contains(tree, (node) => node?.props?.['data-test'] === 'native-conversati
 check(contains(tree, (node) => node?.props?.className?.includes?.('pecker-wb-conversation')),
   '为 conversation 预留了容器类名')
 
+// ---- 0.1.7 布局契约（用户实际反馈：对话区不能调大小、问题卡被挤到看不全）----
+check(contains(tree, (node) => node?.props?.['aria-orientation'] === 'vertical'),
+  '有可拖拽的竖直分隔条（role=separator）——对话区宽度可调')
+check(contains(tree, (node) => typeof node?.props?.className === 'string'
+  && node.props.className.includes('pecker-wb-split')), '分隔条带 pecker-wb-split 类（拖动/双击复位）')
+check(contains(tree, (node) => typeof node?.props?.className === 'string'
+  && node.props.className.includes('pecker-wb-side--collapsed')),
+  '状态区默认收起（把高度让给对话，避免问题卡被挤压）')
+check(contains(tree, (node) => Array.isArray(node?.children) && node.children.includes('对话占满')),
+  '有"对话占满"按钮（一键把整个面板让给对话）')
+// 关键 CSS：对话容器的 min-width/min-height 必须为 0，否则宿主对话节点拒绝收缩会横向溢出
+check(/\.pecker-wb-conversation\s*\{[^}]*min-width:\s*0/.test(source),
+  'CSS: .pecker-wb-conversation 设了 min-width: 0（宿主节点可收缩）')
+check(/\.pecker-wb-conversation\s*\{[^}]*min-height:\s*0/.test(source),
+  'CSS: .pecker-wb-conversation 设了 min-height: 0（内部可滚动而不是溢出）')
+check(/\.pecker-wb-right\s*\{[^}]*overflow:\s*hidden/.test(source),
+  'CSS: .pecker-wb-right 设了 overflow: hidden（内容不越界到看板上）')
+check(source.includes('RIGHT_WIDTH_KEY') && source.includes('pointermove'),
+  '宽度可调并持久化（localStorage + pointermove 拖拽）')
+
 let bare
 try {
   bare = registered.Component({ service, entry: descriptor, conversation: null })
