@@ -758,7 +758,7 @@ const LIMITATIONS = [
   '人工审核只能由人在看板/面板里登记（agent 侧只能写 agent_audit，写不了 approved）：没有人工结论前门禁一律不允许交付',
   '已可执行（供参考）：media.probe / media.extract_clip / media.verify / media.extract_audio / media.burn_subtitle / asr.transcribe（离线，用本机已缓存模型）/ media.download（仅 plan）',
   '门禁已可求值且**真的会拦住交付**：GET /api/versions/{id}/gate 看结论；POST /api/versions/{id}/delivery 在 delivery_allowed=false 时返回 409 且**不写任何文件**（红灯 / 无人工批准 / 黄灯无理由都拦）',
-  '交付清单已可用：放行后写 platform-immutable 的 delivery/<id>/（delivery-manifest.json + delivery-index.md），只登记位置与证据、不含文件副本',
+  '交付清单 / 交付包已可用：放行后写 platform-immutable 的 delivery/<id>/（delivery-manifest.json + delivery-index.md）；带 include_files=true 才连**文件副本**一起打包（复制后复核 sha256，缺件、体积不符或超过上限都直接拒绝且不留半个包）',
   '历史作业已清理：8 个 2026-10-13 的取证作业（无 worker 领取、租约过期）已按"标废"处置为 cancelled；POST /api/jobs/reconcile 可回收死租约（dry_run 可先看）',
-  '平台进程由 deploy/workbench-supervisor.mjs 守护（无控制台、detached）；面板「启动/重启平台」与 /status 自愈都走它',
+  '平台进程由 deploy/workbench-supervisor.mjs 守护（无控制台、detached）；探活区分"连不上"与"端口被占"，端口被占时不再启动新实例（修 2026-10-15 的 10048 崩溃）',
 ]
